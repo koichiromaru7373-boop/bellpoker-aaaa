@@ -1,64 +1,311 @@
-function doPost(e) {
-  try {
-    const body = parsePostBody_(e);
-    // HTML側から送られてくる 'adjustMiles' と、本来の 'miles' 両方に対応できるように修正
-    let action = body.action;
-    if (action === "adjustMiles") {
-      action = "miles"; // アクション名をスプシ用に変換
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Poker Miles QR PWA</title>
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+  <style>
+    body { font-family: sans-serif; background: #ffffff; color: #333333; margin: 0; padding: 20px; }
+    .view { display: none; }
+    .active { display: block; }
+    .card { border: 1px solid #ccc; padding: 15px; margin: 10px 0; border-radius: 5px; }
+    button { padding: 10px 15px; margin: 5px; cursor: pointer; }
+    input { padding: 8px; margin: 5px 0; width: 100%; box-sizing: border-box; }
+    #canvas { width: 100%; max-width: 300px; display: none; border: 1px solid #000; }
+    .calendar { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin-top: 10px; text-align: center; }
+    .day { border: 1px solid #eee; padding: 5px; position: relative; min-height: 40px; }
+    .has-event::after { content: ''; position: absolute; bottom: 3px; left: 50%; transform: translateX(-50%); width: 6px; height: 6px; background: orange; border-radius: 50%; }
+  </style>
+</head>
+<body>
+
+  <div id="toast" style="position:fixed; top:20px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.8); color:#fff; padding:10px 20px; border-radius:5px; display:none; z-index:9999;"></div>
+
+  <div id="view-login" class="view active">
+    <h2>プレイヤーログイン</h2>
+    <form id="login-form">
+      <label>プレイヤーネーム</label>
+      <input type="text" id="login-name" required placeholder="例: テスト">
+      <label>PIN (4桁)</label>
+      <input type="password" id="login-pin" required pattern="\d{4}" placeholder="例: 1234">
+      <button type="submit">ログイン</button>
+    </form>
+    <hr style="margin:20px 0;">
+    <button onclick="checkAdminMode()">店舗管理画面へ切り替え</button>
+  </div>
+
+  <div id="view-mypage" class="view">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <h2 id="user-name">--- さん</h2>
+      <button onclick="logout()">ログアウト</button>
+    </div>
+    <div class="card">
+      <p>現在の保有マイル: <strong id="user-miles" style="font-size:24px; color:blue;">0</strong> miles</p>
+      <p>保有チケット枚数: <strong id="user-tickets" style="font-size:24px; color:green;">0</strong> 枚</p>
+    </div>
+    <div class="card" style="text-align:center;">
+      <p>店舗スタッフにこのQRを提示してください</p>
+      <div id="qrcode" style="display:inline-block; margin:10px;"></div>
+    </div>
+    <div class="card">
+      <h3>イベントカレンダー</h3>
+      <div id="calendar-month-name" style="font-weight:bold; margin-bottom:5px;"></div>
+      <div class="calendar" id="calendar-grid"></div>
+      <div id="event-detail" style="margin-top:15px; padding:10px; background:#f9f9f9; border-left:4px solid orange; display:none;">
+        <h4 id="event-title" style="margin:0 0 5px 0;"></h4>
+        <p id="event-desc" style="margin:0; font-size:14px; color:#666;"></p>
+      </div>
+    </div>
+  </div>
+
+  <div id="view-admin-auth" class="view">
+    <h2>管理者認証</h2>
+    <p>店舗共通のマスターPINを入力してください。</p>
+    <input type="password" id="admin-master-pin" placeholder="9999">
+    <button onclick="authAdmin()">認証する</button>
+    <button onclick="showView('login')">戻る</button>
+  </div>
+
+  <div id="view-admin-main" class="view">
+    <h2>【店舗用】マイル決済・チャージ</h2>
+    <div class="card" id="scanner-box">
+      <p>客のQRコードをカメラにかざしてください</p>
+      <canvas id="canvas"></canvas>
+      <div id="scanner-loading" style="color:red; font-weight:bold;">カメラ起動中...</div>
+    </div>
+    <div id="admin-target-box" class="card" style="display:none;">
+      <h3>読み取り結果</h3>
+      <p>プレイヤー: <strong id="target-name">---</strong></p>
+      <p>現在の残高: <strong id="target-miles">0</strong> miles</p>
+      <hr>
+      <label>操作するマイル数（半角数字）</label>
+      <input type="number" id="charge-amount" placeholder="例: 1000">
+      <div>
+        <button onclick="processTransaction('charge')" style="background:green; color:white;">マイルを足す（チャージ）</button>
+        <button onclick="processTransaction('payment')" style="background:red; color:white;">マイルを引く（決済）</button>
+      </div>
+    </div>
+    <hr style="margin:20px 0;">
+    <button onclick="stopScannerAndReturn()" style="background:#666; color:white;">管理画面を閉じる</button>
+  </div>
+
+  <script>
+    // 【重要】あなたのGoogle Apps ScriptのウェブアプリURLをここに貼り付けてください
+    const GAS_ENDPOINT = "https://script.google.com/macros/s/AKfycbyq6wS1234567890/exec"; 
+
+    const LS_USER_ID = 'poker_pwa_user_id';
+    const state = { currentUser: null, adminTarget: null, events: [] };
+    const els = {
+      toast: document.getElementById('toast'),
+      loginForm: document.getElementById('login-form'),
+      calendarGrid: document.getElementById('calendar-grid'),
+      canvas: document.getElementById('canvas'),
+      video: document.createElement('video')
+    };
+    let scanAnimationFrameId = null;
+
+    window.addEventListener('DOMContentLoaded', async () => {
+      // 1. 先にイベント情報を取得
+      await loadEvents();
+      // 2. 自動ログインチェック
+      const savedId = localStorage.getItem(LS_USER_ID);
+      if (savedId) {
+        const res = await apiGet('getUser', { id: savedId });
+        if (res && res.ok) {
+          state.currentUser = res.user;
+          showView('mypage');
+          return;
+        }
+      }
+      // URLパラメータのチェック (?mode=admin)
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.get('mode') === 'admin') {
+        showView('admin-auth');
+      }
+    });
+
+    function showView(viewId) {
+      document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+      document.getElementById(`view-${viewId}`).classList.add('active');
+      if (viewId === 'mypage') renderMyPage();
+      if (viewId === 'admin-main') startScanner();
     }
-    
-    const userId = body.id || body.userId; // どちらの記述でもIDを認識できるように調整
-    const amount = Number(body.amount || 0);
-    const adminPin = String(body.adminPin || body.masterPin || "").trim(); // masterPinにも対応
 
-    if (adminPin !== ADMIN_MASTER_PIN) {
-      return output_(fail_("管理者認証エラー：PINが違います"));
+    els.loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const name = document.getElementById('login-name').value.trim();
+      const pin = document.getElementById('login-pin').value.trim();
+      const res = await apiGet('login', { name, pin });
+      if (res && res.ok) {
+        state.currentUser = res.user;
+        localStorage.setItem(LS_USER_ID, res.user.id);
+        showView('mypage');
+      } else {
+        showToast(res ? res.message : 'ログインに失敗しました');
+      }
+    });
+
+    function renderMyPage() {
+      document.getElementById('user-name').textContent = `${state.currentUser.name} さん`;
+      document.getElementById('user-miles').textContent = state.currentUser.miles.toLocaleString();
+      document.getElementById('user-tickets').textContent = state.currentUser.tickets;
+      
+      const qrBox = document.getElementById('qrcode');
+      qrBox.innerHTML = '';
+      new QRCode(qrBox, { text: state.currentUser.id, width: 180, height: 180 });
+      renderCalendar();
     }
 
-    const sheet = getSheet_(SHEETS.users);
-    const user = findUserById_(userId);
-    if (!user) return output_(fail_("ユーザーが見つかりません"));
-
-    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
-    const col = getUserColumns_(headers);
-
-    let targetColumnIndex = -1;
-    let currentVal = 0;
-    let actionName = "";
-
-    // HTML側のtype（'payment'か'charge'か）を判別して金額の正負を自動調整
-    const kind = body.type || "";
-    let finalAmount = amount;
-    if (kind === "payment" && amount > 0) {
-      finalAmount = -amount; // マイルを引く場合はマイナスにする
+    async function loadEvents() {
+      const res = await apiGet('getEvents');
+      if (res && res.ok) {
+        state.events = res.events || [];
+      }
     }
 
-    if (action === "miles") {
-      targetColumnIndex = col.miles + 1;
-      currentVal = user.miles;
-      actionName = finalAmount >= 0 ? "チャージ" : "決済";
-    } else if (action === "tickets") {
-      targetColumnIndex = col.tickets + 1;
-      currentVal = user.tickets;
-      actionName = finalAmount >= 0 ? "チケット付与" : "チケット消費";
-    } else {
-      return output_(fail_("無効なポストデータです: " + action));
+    function renderCalendar() {
+      const now = new Date();
+      document.getElementById('calendar-month-name').textContent = `${now.getFullYear()}年 ${now.getMonth() + 1}月`;
+      els.calendarGrid.innerHTML = '';
+      
+      const start = new Date(now.getFullYear(), now.getMonth(), 1);
+      const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+      
+      for (let i = 1; i <= end.getDate(); i++) {
+        const dayEl = document.createElement('div');
+        dayEl.className = 'day';
+        dayEl.textContent = i;
+        
+        const dateKey = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2,'0')}/${String(i).padStart(2,'0')}`;
+        const ev = state.events.find(e => e.date === dateKey);
+        if (ev) {
+          dayEl.classList.add('has-event');
+          dayEl.onclick = () => {
+            document.getElementById('event-title').textContent = ev.title;
+            document.getElementById('event-desc').textContent = ev.description;
+            document.getElementById('event-detail').style.display = 'block';
+          };
+        }
+        els.calendarGrid.appendChild(dayEl);
+      }
     }
 
-    const newVal = currentVal + finalAmount;
-    if (newVal < 0) return output_(fail_("残高が不足しています"));
+    function checkAdminMode() { showView('admin-auth'); }
+    function authAdmin() {
+      if (document.getElementById('admin-master-pin').value === '9999') {
+        showView('admin-main');
+      } else {
+        showToast('PINが違います');
+      }
+    }
 
-    // スプレッドシートの更新
-    sheet.getRange(user.rowNumber, targetColumnIndex).setValue(newVal);
-    
-    // 履歴の追記
-    appendHistory_(userId, actionName, Math.abs(finalAmount));
+    function startScanner() {
+      document.getElementById('scanner-loading').style.display = 'block';
+      document.getElementById('admin-target-box').style.display = 'none';
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then(stream => {
+        els.video.srcObject = stream;
+        els.video.setAttribute("playsinline", true);
+        els.video.play();
+        scanAnimationFrameId = requestAnimationFrame(tick);
+      });
+    }
 
-    // 最新のユーザー情報を返す
-    const updatedUser = findUserById_(userId);
-    return output_(ok_({ user: publicUser_(updatedUser) }));
+    function tick() {
+      if (els.video.readyState === els.video.HAVE_ENOUGH_DATA) {
+        document.getElementById('scanner-loading').style.display = 'none';
+        els.canvas.style.display = 'block';
+        els.canvas.height = els.video.videoHeight;
+        els.canvas.width = els.video.videoWidth;
+        const ctx = els.canvas.getContext('2d');
+        ctx.drawImage(els.video, 0, 0, els.canvas.width, els.canvas.height);
+        const imageData = ctx.getImageData(0, 0, els.canvas.width, els.canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
+        if (code && code.data) {
+          stopScanner();
+          loadTargetUser(code.data);
+          return;
+        }
+      }
+      scanAnimationFrameId = requestAnimationFrame(tick);
+    }
 
-  } catch (err) {
-    return output_(fail_("システムエラー: " + err.message));
-  }
-}
+    function stopScanner() {
+      cancelAnimationFrameId(scanAnimationFrameId);
+      if (els.video.srcObject) {
+        els.video.srcObject.getTracks().forEach(track => track.stop());
+      }
+      els.canvas.style.display = 'none';
+    }
+
+    async function loadTargetUser(id) {
+      const res = await apiGet('getUser', { id });
+      if (res && res.ok) {
+        state.adminTarget = res.user;
+        document.getElementById('target-name').textContent = res.user.name;
+        document.getElementById('target-miles').textContent = res.user.miles.toLocaleString();
+        document.getElementById('admin-target-box').style.display = 'block';
+      } else {
+        showToast('客のデータが見つかりません');
+        startScanner();
+      }
+    }
+
+    async function processTransaction(kind) {
+      const amount = parseInt(document.getElementById('charge-amount').value);
+      if (!amount || amount <= 0) return showToast('正しい金額を入力してください');
+      if (!confirm(`${state.adminTarget.name} さんのマイルを操作しますか？`)) return;
+
+      const res = await apiPost({
+        action: 'adjustMiles',
+        adminPin: '9999',
+        id: state.adminTarget.id,
+        type: kind,
+        amount: amount
+      });
+
+      if (res && res.ok) {
+        showToast('更新完了しました！');
+        document.getElementById('charge-amount').value = '';
+        loadTargetUser(state.adminTarget.id);
+      } else {
+        showToast(res ? res.message : 'エラーが発生しました');
+      }
+    }
+
+    function stopScannerAndReturn() { stopScanner(); showView('login'); }
+    function logout() { localStorage.removeItem(LS_USER_ID); showView('login'); }
+
+    async function apiGet(action, params = {}) {
+      const query = new URLSearchParams({ action, ...params, t: Date.now() });
+      try {
+        const response = await fetch(`${GAS_ENDPOINT}?${query.toString()}`);
+        return await response.json();
+      } catch (err) {
+        return new Promise(res => {
+          const cb = `jsonp_${Date.now()}`;
+          window[cb] = (data) => { delete window[cb]; res(data); };
+          const s = document.createElement('script');
+          s.src = `${GAS_ENDPOINT}?${query.toString()}&callback=${cb}`;
+          document.head.appendChild(s);
+        });
+      }
+    }
+
+    async function apiPost(payload) {
+      const response = await fetch(GAS_ENDPOINT, {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      return await response.json();
+    }
+
+    function showToast(msg) {
+      els.toast.textContent = msg;
+      els.toast.style.display = 'block';
+      setTimeout(() => { els.toast.style.display = 'none'; }, 3000);
+    }
+  </script>
+</body>
+</html>
