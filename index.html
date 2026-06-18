@@ -1,0 +1,144 @@
+        return;
+      }
+
+      const label = kind === 'payment' ? 'マイルを引く' : 'マイルを足す';
+      const message = `${state.adminTarget.name} さんの残高に対して ${formatNumber(amount)} miles を${kind === 'payment' ? '減算' : '加算'}します。よろしいですか？`;
+      if (!confirm(message)) return;
+
+      try {
+        const res = await apiPost({
+          action: 'adjustMiles',
+          masterPin: state.adminPin || els.adminPinInput.value.trim(),
+          userId: state.adminTarget.id,
+          type: kind,
+          amount
+        });
+        if (!res.ok) throw new Error(res.message || `${label}に失敗しました`);
+        state.adminTarget = normalizeUser(res.user);
+        state.amount = '';
+        renderAdminTarget();
+        showToast('更新しました');
+      } catch (err) {
+        showToast(err.message || '更新できませんでした');
+      }
+    }
+
+    async function apiGet(action, params = {}) {
+      const query = new URLSearchParams({ action, ...params, t: Date.now().toString() });
+      const url = `${GAS_ENDPOINT}?${query.toString()}`;
+
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          cache: 'no-store',
+          redirect: 'follow'
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return await response.json();
+      } catch (err) {
+        return await jsonp(url);
+      }
+    }
+
+    async function apiPost(payload) {
+      const response = await fetch(GAS_ENDPOINT, {
+        method: 'POST',
+        mode: 'cors',
+        redirect: 'follow',
+        headers: {
+          'Content-Type': 'text/plain;charset=utf-8'
+        },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await response.json();
+    }
+
+    function jsonp(url) {
+      return new Promise((resolve, reject) => {
+        const callbackName = `jsonp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        const script = document.createElement('script');
+        const separator = url.includes('?') ? '&' : '?';
+        script.src = `${url}${separator}callback=${callbackName}`;
+        script.async = true;
+        const timer = setTimeout(() => {
+          cleanup();
+          reject(new Error('通信がタイムアウトしました'));
+        }, 12000);
+
+        window[callbackName] = (data) => {
+          cleanup();
+          resolve(data);
+        };
+
+        script.onerror = () => {
+          cleanup();
+          reject(new Error('GASへ接続できません'));
+        };
+
+        function cleanup() {
+          clearTimeout(timer);
+          delete window[callbackName];
+          script.remove();
+        }
+
+        document.head.appendChild(script);
+      });
+    }
+
+    function logout() {
+      localStorage.removeItem(LS_USER_ID);
+      state.currentUser = null;
+      els.loginForm.reset();
+      showView('login');
+    }
+
+    function normalizeUser(user) {
+      return {
+        id: String(user.id ?? user.ID ?? ''),
+        name: String(user.name ?? user.playerName ?? user['プレイヤーネーム'] ?? ''),
+        miles: Number(user.miles ?? user['マイル残高'] ?? 0),
+        tickets: Number(user.tickets ?? user['チケット枚数'] ?? 0)
+      };
+    }
+
+    function normalizeDateKey(value) {
+      if (!value) return '';
+      const text = String(value).trim().replaceAll('-', '/');
+      const match = text.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})/);
+      if (!match) return text;
+      return `${match[1]}/${pad2(match[2])}/${pad2(match[3])}`;
+    }
+
+    function formatDateKey(date) {
+      return `${date.getFullYear()}/${pad2(date.getMonth() + 1)}/${pad2(date.getDate())}`;
+    }
+
+    function pad2(value) {
+      return String(value).padStart(2, '0');
+    }
+
+    function formatNumber(value) {
+      return Number(value || 0).toLocaleString('ja-JP');
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+    }
+
+    function showToast(message) {
+      els.toast.textContent = message;
+      els.toast.classList.remove('hidden');
+      clearTimeout(showToast.timer);
+      showToast.timer = setTimeout(() => {
+        els.toast.classList.add('hidden');
+      }, 3000);
+    }
+  </script>
+</body>
+</html>
