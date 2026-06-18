@@ -1,144 +1,64 @@
-        return;
-      }
+function doPost(e) {
+  try {
+    const body = parsePostBody_(e);
+    // HTML側から送られてくる 'adjustMiles' と、本来の 'miles' 両方に対応できるように修正
+    let action = body.action;
+    if (action === "adjustMiles") {
+      action = "miles"; // アクション名をスプシ用に変換
+    }
+    
+    const userId = body.id || body.userId; // どちらの記述でもIDを認識できるように調整
+    const amount = Number(body.amount || 0);
+    const adminPin = String(body.adminPin || body.masterPin || "").trim(); // masterPinにも対応
 
-      const label = kind === 'payment' ? 'マイルを引く' : 'マイルを足す';
-      const message = `${state.adminTarget.name} さんの残高に対して ${formatNumber(amount)} miles を${kind === 'payment' ? '減算' : '加算'}します。よろしいですか？`;
-      if (!confirm(message)) return;
-
-      try {
-        const res = await apiPost({
-          action: 'adjustMiles',
-          masterPin: state.adminPin || els.adminPinInput.value.trim(),
-          userId: state.adminTarget.id,
-          type: kind,
-          amount
-        });
-        if (!res.ok) throw new Error(res.message || `${label}に失敗しました`);
-        state.adminTarget = normalizeUser(res.user);
-        state.amount = '';
-        renderAdminTarget();
-        showToast('更新しました');
-      } catch (err) {
-        showToast(err.message || '更新できませんでした');
-      }
+    if (adminPin !== ADMIN_MASTER_PIN) {
+      return output_(fail_("管理者認証エラー：PINが違います"));
     }
 
-    async function apiGet(action, params = {}) {
-      const query = new URLSearchParams({ action, ...params, t: Date.now().toString() });
-      const url = `${GAS_ENDPOINT}?${query.toString()}`;
+    const sheet = getSheet_(SHEETS.users);
+    const user = findUserById_(userId);
+    if (!user) return output_(fail_("ユーザーが見つかりません"));
 
-      try {
-        const response = await fetch(url, {
-          method: 'GET',
-          cache: 'no-store',
-          redirect: 'follow'
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return await response.json();
-      } catch (err) {
-        return await jsonp(url);
-      }
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+    const col = getUserColumns_(headers);
+
+    let targetColumnIndex = -1;
+    let currentVal = 0;
+    let actionName = "";
+
+    // HTML側のtype（'payment'か'charge'か）を判別して金額の正負を自動調整
+    const kind = body.type || "";
+    let finalAmount = amount;
+    if (kind === "payment" && amount > 0) {
+      finalAmount = -amount; // マイルを引く場合はマイナスにする
     }
 
-    async function apiPost(payload) {
-      const response = await fetch(GAS_ENDPOINT, {
-        method: 'POST',
-        mode: 'cors',
-        redirect: 'follow',
-        headers: {
-          'Content-Type': 'text/plain;charset=utf-8'
-        },
-        body: JSON.stringify(payload)
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return await response.json();
+    if (action === "miles") {
+      targetColumnIndex = col.miles + 1;
+      currentVal = user.miles;
+      actionName = finalAmount >= 0 ? "チャージ" : "決済";
+    } else if (action === "tickets") {
+      targetColumnIndex = col.tickets + 1;
+      currentVal = user.tickets;
+      actionName = finalAmount >= 0 ? "チケット付与" : "チケット消費";
+    } else {
+      return output_(fail_("無効なポストデータです: " + action));
     }
 
-    function jsonp(url) {
-      return new Promise((resolve, reject) => {
-        const callbackName = `jsonp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-        const script = document.createElement('script');
-        const separator = url.includes('?') ? '&' : '?';
-        script.src = `${url}${separator}callback=${callbackName}`;
-        script.async = true;
-        const timer = setTimeout(() => {
-          cleanup();
-          reject(new Error('通信がタイムアウトしました'));
-        }, 12000);
+    const newVal = currentVal + finalAmount;
+    if (newVal < 0) return output_(fail_("残高が不足しています"));
 
-        window[callbackName] = (data) => {
-          cleanup();
-          resolve(data);
-        };
+    // スプレッドシートの更新
+    sheet.getRange(user.rowNumber, targetColumnIndex).setValue(newVal);
+    
+    // 履歴の追記
+    appendHistory_(userId, actionName, Math.abs(finalAmount));
 
-        script.onerror = () => {
-          cleanup();
-          reject(new Error('GASへ接続できません'));
-        };
+    // 最新のユーザー情報を返す
+    const updatedUser = findUserById_(userId);
+    return output_(ok_({ user: publicUser_(updatedUser) }));
 
-        function cleanup() {
-          clearTimeout(timer);
-          delete window[callbackName];
-          script.remove();
-        }
-
-        document.head.appendChild(script);
-      });
-    }
-
-    function logout() {
-      localStorage.removeItem(LS_USER_ID);
-      state.currentUser = null;
-      els.loginForm.reset();
-      showView('login');
-    }
-
-    function normalizeUser(user) {
-      return {
-        id: String(user.id ?? user.ID ?? ''),
-        name: String(user.name ?? user.playerName ?? user['プレイヤーネーム'] ?? ''),
-        miles: Number(user.miles ?? user['マイル残高'] ?? 0),
-        tickets: Number(user.tickets ?? user['チケット枚数'] ?? 0)
-      };
-    }
-
-    function normalizeDateKey(value) {
-      if (!value) return '';
-      const text = String(value).trim().replaceAll('-', '/');
-      const match = text.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})/);
-      if (!match) return text;
-      return `${match[1]}/${pad2(match[2])}/${pad2(match[3])}`;
-    }
-
-    function formatDateKey(date) {
-      return `${date.getFullYear()}/${pad2(date.getMonth() + 1)}/${pad2(date.getDate())}`;
-    }
-
-    function pad2(value) {
-      return String(value).padStart(2, '0');
-    }
-
-    function formatNumber(value) {
-      return Number(value || 0).toLocaleString('ja-JP');
-    }
-
-    function escapeHtml(value) {
-      return String(value)
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;');
-    }
-
-    function showToast(message) {
-      els.toast.textContent = message;
-      els.toast.classList.remove('hidden');
-      clearTimeout(showToast.timer);
-      showToast.timer = setTimeout(() => {
-        els.toast.classList.add('hidden');
-      }, 3000);
-    }
-  </script>
-</body>
-</html>
+  } catch (err) {
+    return output_(fail_("システムエラー: " + err.message));
+  }
+}
