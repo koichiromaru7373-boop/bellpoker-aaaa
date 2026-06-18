@@ -275,18 +275,27 @@
     function logout() { localStorage.removeItem(LS_USER_ID); showView('login'); }
 
     // 【ここを修正】GASの最新のデータ形式(JSON)に100%対応する通信方式に変更
+    // 【決定版】Googleのセキュリティブロック（302エラー）を確実に回避する通信方式
     async function apiGet(action, params = {}) {
       const query = new URLSearchParams({ action, ...params, t: Date.now() });
-      try {
-        const response = await fetch(`${GAS_ENDPOINT}?${query.toString()}`);
-        if (!response.ok) throw new Error();
-        return await response.json();
-      } catch (err) {
-        // 万が一通常の通信が弾かれた場合のみ、セーフティとしてリダイレクトを考慮
-        const sUrl = `${GAS_ENDPOINT}?${query.toString()}`;
-        const res = await fetch(sUrl, { method: 'GET', redirect: 'follow' });
-        return await res.json();
-      }
+      return new Promise((resolve) => {
+        const callbackName = `jsonp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        
+        window[callbackName] = (data) => {
+          delete window[callbackName];
+          script.remove();
+          resolve(data);
+        };
+
+        const script = document.createElement('script');
+        script.src = `${GAS_ENDPOINT}?${query.toString()}&callback=${callbackName}`;
+        script.onerror = () => {
+          delete window[callbackName];
+          script.remove();
+          resolve({ ok: false, message: "通信エラーが発生しました" });
+        };
+        document.head.appendChild(script);
+      });
     }
 
     async function apiPost(payload) {
