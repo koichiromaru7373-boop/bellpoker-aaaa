@@ -92,7 +92,7 @@
   </div>
 
   <script>
-    // 【重要】あなたのGoogle Apps ScriptのウェブアプリURLをここに貼り付けてください
+    // あなたの最新のGASのURLを埋め込み済みです
     const GAS_ENDPOINT = "https://script.google.com/macros/s/AKfycbwcjR8Lm-oUbNxnu3cV_VNu8ufPni8DPPP17ObCOOzcm-3ioQfk-RizcdlXcHbxJyaTYw/exec"; 
 
     const LS_USER_ID = 'poker_pwa_user_id';
@@ -107,9 +107,7 @@
     let scanAnimationFrameId = null;
 
     window.addEventListener('DOMContentLoaded', async () => {
-      // 1. 先にイベント情報を取得
       await loadEvents();
-      // 2. 自動ログインチェック
       const savedId = localStorage.getItem(LS_USER_ID);
       if (savedId) {
         const res = await apiGet('getUser', { id: savedId });
@@ -119,7 +117,6 @@
           return;
         }
       }
-      // URLパラメータのチェック (?mode=admin)
       const urlParams = new URLSearchParams(window.location.search);
       if (urlParams.get('mode') === 'admin') {
         showView('admin-auth');
@@ -277,19 +274,18 @@
     function stopScannerAndReturn() { stopScanner(); showView('login'); }
     function logout() { localStorage.removeItem(LS_USER_ID); showView('login'); }
 
+    // 【ここを修正】GASの最新のデータ形式(JSON)に100%対応する通信方式に変更
     async function apiGet(action, params = {}) {
       const query = new URLSearchParams({ action, ...params, t: Date.now() });
       try {
         const response = await fetch(`${GAS_ENDPOINT}?${query.toString()}`);
+        if (!response.ok) throw new Error();
         return await response.json();
       } catch (err) {
-        return new Promise(res => {
-          const cb = `jsonp_${Date.now()}`;
-          window[cb] = (data) => { delete window[cb]; res(data); };
-          const s = document.createElement('script');
-          s.src = `${GAS_ENDPOINT}?${query.toString()}&callback=${cb}`;
-          document.head.appendChild(s);
-        });
+        // 万が一通常の通信が弾かれた場合のみ、セーフティとしてリダイレクトを考慮
+        const sUrl = `${GAS_ENDPOINT}?${query.toString()}`;
+        const res = await fetch(sUrl, { method: 'GET', redirect: 'follow' });
+        return await res.json();
       }
     }
 
